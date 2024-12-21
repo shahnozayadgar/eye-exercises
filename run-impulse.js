@@ -3,9 +3,15 @@ const Module = require('./edge-impulse-standalone');
 const fs = require('fs');
 const { SerialPort, ReadlineParser } = require('serialport');
 
-// Set these to match your environment
 const path = '/dev/tty.usbmodem101';
 const baudRate = 115200;
+
+//const correctSequence = ['default', 'left-right', 'left-right', 'up-down', 'up-down', 'circle-right', 'circle-right', 'circle-left', 'circle-left', 'square-right', 'square-right', 'square-left', 'square-left'];
+const correctSequence = ['default', 'up-down', 'left-right', 'circle-right', 'square-right',  'square-left'];
+
+
+//const correctSequence = ['default', 'left-right', 'up-down', 'circle-right', 'circle-left', 'square-right', 'square-left'];
+let currentStep = 0; // Tracks the current step in the sequence
 
 // Classifier module
 let classifierInitialized = false;
@@ -129,6 +135,7 @@ class EdgeImpulseClassifier {
     }
 }
 
+
 (async () => {
     // Create an instance of the classifier
     let classifier = new EdgeImpulseClassifier();
@@ -167,27 +174,37 @@ class EdgeImpulseClassifier {
 
     const parser = port.pipe(new ReadlineParser({ delimiter: '\r\n' }));
 
-    // Handle incoming data
+    // ================== Modified: Handle Incoming Data with Acknowledgment ==================
     parser.on('data', (line) => {
-        const parts = line.trim().split(',');
-        if (parts.length !== 3) {
-            // Expecting three values: ax, ay, az
-            console.error('Invalid data format. Expected three comma-separated values.');
+        const trimmedLine = line.trim();
+
+        // Handle Acknowledgments
+        if (trimmedLine === 'BUZZER_ACTIVATED') {
+            console.log('Pico acknowledged buzzer activation.');
             return;
         }
+        if (trimmedLine === 'LED_ACTIVATED') {
+            console.log('Pico acknowledged LED activation.');
+            return;
+        }
+
+        // =====================================================================
+
+        const parts = trimmedLine.split(',');
 
         const ax = parseFloat(parts[0]);
         const ay = parseFloat(parts[1]);
         const az = parseFloat(parts[2]);
 
         if (isNaN(ax) || isNaN(ay) || isNaN(az)) {
-            console.error('Received non-numeric data:', line);
+            console.error('Received non-numeric data:', trimmedLine);
             return;
         }
 
         // Append the three-axis data to the buffer
         buffer.push(ax, ay, az);
     });
+    // ========================================
 
     parser.on('error', (err) => {
         console.error('Parser error:', err);
@@ -198,6 +215,20 @@ class EdgeImpulseClassifier {
     });
 
     console.log('Starting data collection and classification every 5 seconds...');
+
+    // ================== Added: Function to Send Commands to Pico ==================
+    const sendCommandToPico = (command) => {
+        if (port.isOpen) {
+            port.write(`${command}\n`, (err) => {
+                if (err) {
+                    return console.error('Error sending command to Pico:', err.message);
+                }
+                console.log(`Command sent to Pico: ${command}`);
+            });
+        } else {
+            console.error('Serial port is not open.');
+        }
+    };
 
     // Function to perform classification
     const classifyData = () => {
@@ -214,6 +245,37 @@ class EdgeImpulseClassifier {
             const result = classifier.classify(dataToClassify);
             delete result.anomaly; // Remove anomaly if not needed
             console.log('Prediction:', result);
+
+            const classifiedDirections = result.results.map(res => res.label);
+
+            // Find the label with the highest value
+            let detectedDirection = 'unknown';
+            let maxValue = -Infinity;
+            for (let res of result.results) {
+                if (res.value > maxValue) {
+                    maxValue = res.value;
+                    detectedDirection = res.label;
+                }
+            }
+            console.log('Detected Direction:', detectedDirection);
+            // ================== Added: Validate Detected Direction and Send Command ==================
+            if (detectedDirection === correctSequence[currentStep]) {
+                console.log(`Correct direction: ${detectedDirection}`);
+                sendCommandToPico('BUZZER_ON'); // Send command to Pico
+
+                currentStep += 1; // Move to the next step in the sequence
+
+                // Reset if the entire sequence is completed
+                if (currentStep >= correctSequence.length) {
+                    console.log('Sequence completed successfully!');
+                    currentStep = 0; // Reset for the next round
+                }
+            } else {
+                console.log(`Incorrect direction. Expected: ${correctSequence[currentStep]}, but got: ${detectedDirection}`);
+                // Optionally, reset the sequence or handle incorrect directions
+                sendCommandToPico('LED_ON'); // Send command to Pico
+                //currentStep = 0; // Reset the sequence
+            }
         } catch (err) {
             console.error('Classification error:', err);
         }
@@ -222,3 +284,4 @@ class EdgeImpulseClassifier {
     // Schedule classification every 5 seconds
     setInterval(classifyData, DURATION_MS);
 })();
+
